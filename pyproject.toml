@@ -1,0 +1,18 @@
+[project]
+name = "claudette"
+version = "1.0.0"
+description = "Run Claude Code against Mistral models through a local LiteLLM proxy"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+dependencies = [
+    # Pinned exactly: litellm 1.82.7/1.82.8 were malicious PyPI uploads (PYSEC-2026-2).
+    # Bump deliberately, to a release that has been public for at least two weeks.
+    "litellm[proxy]==1.106.6",
+    # Used by mcp_servers/web_search.py. Pinned to the versions litellm already
+    # resolves, so a litellm bump can't silently change them.
+    "mcp==2.3.0",
+    "httpx==0.28.1",
+]
+
+[tool.uv]
+package = false

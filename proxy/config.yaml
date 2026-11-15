@@ -1,0 +1,22 @@
+# LiteLLM proxy config for claudette.
+# Claude Code sends Anthropic Messages requests; LiteLLM translates them to
+# Mistral's OpenAI-style /v1/chat/completions.
+model_list:
+  # Pass any model name through to Mistral, so every model the key can use
+  # works without an entry here. Unknown names get Mistral's own
+  # "Invalid model" error.
+  - model_name: "*"
+    litellm_params:
+      model: "mistral/*"
+      api_key: os.environ/MISTRAL_API_KEY
+
+litellm_settings:
+  # Claude Code sends Anthropic-only fields (thinking, context_management,
+  # output_config, ...) that Mistral rejects; drop them instead of failing.
+  drop_params: true
+  # Fixes streamed parallel tool calls; see claudette_patches.py.
+  callbacks: claudette_patches.handler
+  telemetry: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

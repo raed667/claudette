@@ -1,0 +1,33 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned by commit: LiteLLM's 2026 compromises started in CI.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+      - name: shellcheck
+        run: shellcheck bin/claudette install.sh
+      - name: ruff
+        run: |
+          uvx ruff@0.8.6 check bin/ scripts/ mcp_servers/ proxy/
+          uvx ruff@0.8.6 format --check bin/ scripts/ mcp_servers/ proxy/
+      - name: lockfile in sync
+        run: uv lock --check
+      # claudette_patches.py fails on import if the LiteLLM internals it
+      # patches have moved, which is what a careless LiteLLM bump looks like.
+      - name: LiteLLM patch still applies
+        run: |
+          uv sync --frozen
+          uv run --frozen python -c "import sys; sys.path.insert(0, 'proxy'); import claudette_patches"

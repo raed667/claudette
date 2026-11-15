@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# claudette: run Claude Code against Mistral models through a local LiteLLM proxy.
+#
+#   claudette [claude args...]     start the proxy if needed, then run claude
+#   claudette proxy start|stop|restart|status|logs
+#   claudette update               pull the latest version and reinstall deps
+#   claudette models [--refresh]   list the Mistral models this key can use
+#
+# Mistral API key: $MISTRAL_API_KEY, or the file $CLAUDETTE_CONFIG/mistral_api_key.
+set -euo pipefail
+
+resolve() {
+  local p=$1
+  while [ -L "$p" ]; do
+    local d; d=$(cd -P "$(dirname "$p")" && pwd)
+    p=$(readlink "$p"); [[ $p != /* ]] && p=$d/$p
+  done
+  cd -P "$(dirname "$p")/.." && pwd
+}
+ROOT=$(resolve "${BASH_SOURCE[0]}")
+
+CLAUDETTE_CONFIG=${CLAUDETTE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/claudette}
+STATE=${CLAUDETTE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/claudette}
+PORT=${CLAUDETTE_PORT:-4791}
+BASE_URL="http://127.0.0.1:$PORT"
+PIDFILE=$STATE/proxy.pid
+LOGFILE=$STATE/proxy.log
+KEYFILE=$STATE/proxy.key
+
+MAIN_MODEL=${CLAUDETTE_MODEL:-mistral-large-latest}
+FAST_MODEL=${CLAUDETTE_FAST_MODEL:-mistral-small-latest}
+# Compaction threshold when the model's own window is larger or unknown. Large
+# has 1M tokens, but every turn resends the whole context, so letting it fill
+# gets expensive long before it gets useful.
+COMPACT_CAP=256000
+# Claude Code refuses CLAUDE_CODE_AUTO_COMPACT_WINDOW below this.
+COMPACT_MIN=100000
+
+die() { echo "claudette: $*" >&2; exit 1; }
+warn() { echo "claudette: warning: $*" >&2; }
+
+models_py() {
+  CLAUDETTE_STATE=$STATE CLAUDETTE_CONFIG=$CLAUDETTE_CONFIG \
+    "$ROOT/.venv/bin/python" "$ROOT/bin/models.py" "$@"
+}
+
+# Claude Code assumes 1M tokens for model ids it doesn't recognise, so the
+# threshold comes from Mistral's max_context_length for the main model.
+compact_window() {
+  if [ -n "${CLAUDETTE_COMPACT_WINDOW:-}" ]; then
+    echo "$CLAUDETTE_COMPACT_WINDOW"
+    return
+  fi
+  local ctx rc=0
+  ctx=$(models_py context "$MAIN_MODEL" 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    warn "$MAIN_MODEL isn't in your key's model list; see 'claudette models'"
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$ctx" ]; then
+    echo "$COMPACT_CAP"
+  elif [ "$ctx" -lt "$COMPACT_MIN" ]; then
+    warn "$MAIN_MODEL has a ${ctx}-token window, below Claude Code's ${COMPACT_MIN} compaction minimum"
+    echo "$COMPACT_MIN"
+  elif [ "$ctx" -gt "$COMPACT_CAP" ]; then
+    echo "$COMPACT_CAP"
+  else
+    echo "$ctx"
+  fi
+}
+
+mistral_key() {
+  if [ -n "${MISTRAL_API_KEY:-}" ]; then
+    printf '%s' "$MISTRAL_API_KEY"
+  elif [ -r "$CLAUDETTE_CONFIG/mistral_api_key" ]; then
+    tr -d '[:space:]' < "$CLAUDETTE_CONFIG/mistral_api_key"
+  else
+    die "no Mistral API key: export MISTRAL_API_KEY or write it to $CLAUDETTE_CONFIG/mistral_api_key"
+  fi
+}
+
+# The proxy is reachable by anything on localhost, so it gets its own random
+# key rather than relying on the port being private.
+proxy_key() {
+  if [ ! -s "$KEYFILE" ]; then
+    mkdir -p "$STATE"
+    (umask 077; printf 'sk-claudette-%s' "$(openssl rand -hex 24)" > "$KEYFILE")
+  fi
+  cat "$KEYFILE"
+}
+
+proxy_healthy() {
+  curl -fsS -o /dev/null --max-time 2 "$BASE_URL/health/liveliness" 2>/dev/null
+}
+
+# Healthy isn't enough: another claudette install (or a stale proxy after the
+# state dir was wiped) can hold the port with a different key, and LiteLLM
+# then fails every request with an opaque "No connected db" error.
+proxy_accepts_key() {
+  curl -fsS -o /dev/null --max-time 5 -H "Authorization: Bearer $(proxy_key)" \
+    "$BASE_URL/v1/models" 2>/dev/null
+}
+
+proxy_start() {
+  if proxy_healthy; then
+    proxy_accepts_key && return 0
+    die "a proxy on $BASE_URL rejects this install's key (another claudette install?). Stop it, or set CLAUDETTE_PORT"
+  fi
+  command -v uv >/dev/null || die "uv is required: https://docs.astral.sh/uv/"
+  mkdir -p "$STATE"
+  local mkey; mkey=$(mistral_key)
+  echo "claudette: starting LiteLLM proxy on $BASE_URL (log: $LOGFILE)" >&2
+  MISTRAL_API_KEY="$mkey" LITELLM_MASTER_KEY="$(proxy_key)" \
+    nohup uv run --quiet --frozen --project "$ROOT" \
+      litellm --config "$ROOT/proxy/config.yaml" --host 127.0.0.1 --port "$PORT" \
+      >"$LOGFILE" 2>&1 &
+  echo $! > "$PIDFILE"
+  for _ in $(seq 1 120); do
+    proxy_healthy && return 0
+    kill -0 "$(cat "$PIDFILE")" 2>/dev/null || { tail -20 "$LOGFILE" >&2; die "proxy exited during startup"; }
+    sleep 0.5
+  done
+  die "proxy did not become healthy within 60s; see $LOGFILE"
+}
+
+proxy_stop() {
+  if [ -f "$PIDFILE" ]; then
+    local pid; pid=$(cat "$PIDFILE")
+    # uv spawns litellm as a child; take down the whole tree.
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    rm -f "$PIDFILE"
+  fi
+  for _ in $(seq 1 20); do proxy_healthy || return 0; sleep 0.25; done
+  die "something is still serving $BASE_URL; not started by claudette?"
+}
+
+if [ "${1:-}" = update ]; then
+  # Point the installer at this checkout so CLAUDETTE_HOME needn't be set.
+  CLAUDETTE_HOME=$ROOT exec bash "$ROOT/install.sh"
+fi
+
+if [ "${1:-}" = models ]; then
+  [ -x "$ROOT/.venv/bin/python" ] || uv sync --quiet --frozen --project "$ROOT"
+  shift
+  exec env CLAUDETTE_STATE="$STATE" CLAUDETTE_CONFIG="$CLAUDETTE_CONFIG" \
+    "$ROOT/.venv/bin/python" "$ROOT/bin/models.py" list "$@"
+fi
+
+if [ "${1:-}" = proxy ]; then
+  case "${2:-status}" in
+    start) proxy_start; echo "running on $BASE_URL" ;;
+    stop) proxy_stop; echo "stopped" ;;
+    restart) proxy_stop; proxy_start; echo "running on $BASE_URL" ;;
+    status) if proxy_healthy; then echo "running on $BASE_URL"; else echo "not running"; exit 1; fi ;;
+    logs) exec tail -f "$LOGFILE" ;;
+    *) die "usage: claudette proxy start|stop|restart|status|logs" ;;
+  esac
+  exit 0
+fi
+
+command -v claude >/dev/null || die "Claude Code is required: https://code.claude.com"
+proxy_start
+
+# Separate config dir: claudette's history, settings and onboarding state
+# never mix with a regular Claude Code install.
+export CLAUDE_CONFIG_DIR=${CLAUDETTE_CLAUDE_CONFIG_DIR:-$HOME/.claudette}
+
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_BASE_URL=$BASE_URL
+ANTHROPIC_AUTH_TOKEN=$(proxy_key)
+export ANTHROPIC_AUTH_TOKEN
+export ANTHROPIC_MODEL=$MAIN_MODEL
+# Every model alias Claude Code knows resolves to Mistral, so `--model fable`
+# or `/model opus` can't send a Claude model name to the proxy.
+export ANTHROPIC_DEFAULT_FABLE_MODEL=$MAIN_MODEL
+export ANTHROPIC_DEFAULT_OPUS_MODEL=$MAIN_MODEL
+export ANTHROPIC_DEFAULT_SONNET_MODEL=$MAIN_MODEL
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=$FAST_MODEL
+export ANTHROPIC_SMALL_FAST_MODEL=$FAST_MODEL
+export CLAUDE_CODE_SUBAGENT_MODEL=${CLAUDETTE_SUBAGENT_MODEL:-$MAIN_MODEL}
+CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(compact_window)
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW
+# Beta request fields (context_management, strict tools, output_config) have
+# no Mistral equivalent.
+export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
+# Skips calls that go straight to api.anthropic.com and would fail or leak
+# usage data without an Anthropic account.
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+# The search MCP server reads the key from here when MISTRAL_API_KEY is unset.
+export CLAUDETTE_CONFIG
+
+json_str() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+mkdir -p "$STATE"
+cat > "$STATE/mcp.json" <<EOF
+{"mcpServers": {"claudette": {"type": "stdio", "command": "uv",
+  "args": ["run", "--quiet", "--frozen", "--project", $(json_str "$ROOT"),
+           "python", $(json_str "$ROOT/mcp_servers/web_search.py")]}}}
+EOF
+
+# Permissions (WebSearch swapped for the Mistral search tool), the default
+# status line and the /model picker lineup; see bin/settings.py.
+export CLAUDETTE_STATE
+env ROOT="$ROOT" CLAUDETTE_MODEL="$MAIN_MODEL" \
+  "$ROOT/.venv/bin/python" "$ROOT/bin/settings.py" "$STATE/settings.json"
+
+# --mcp-config takes a list of values and would swallow the user's positional
+# arguments (`claudette mcp list`, `claudette "prompt"`); --settings takes one
+# value, so placing it last ends that list.
+exec claude --mcp-config "$STATE/mcp.json" --settings "$STATE/settings.json" "$@"
