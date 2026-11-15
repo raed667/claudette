@@ -54,7 +54,8 @@ mistral-large | ctx 42k/256k 16% | ~$0.96 | claudette (main)
 ```
 
 The cost is the session's spend so far at Mistral's list prices, cached input
-included, and doesn't count web searches. A trailing `+` means part of the
+included. It doesn't count web searches or the extra requests auto mode makes
+to check tool calls. A trailing `+` means part of the
 session used a model without a known price. Mistral doesn't publish one for
 Medium, so a Medium-only session shows no cost.
 

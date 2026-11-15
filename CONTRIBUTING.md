@@ -106,6 +106,7 @@ are worth re-checking after a Claude Code or LiteLLM upgrade:
 - The `/model` picker lineup and the `fable` alias
 - The status line, including cost across turns against a hand calculation
 - `ministral-14b-latest` through the wildcard route
+- Auto mode, with its permission classifier running on the main model
 
 To drive an interactive session from a script, a Python `pty` works where
 `expect` didn't. Strip ANSI codes before matching text, and note that the
@@ -173,6 +174,16 @@ Code also assumes a 1M-token window for unknown models, so the launcher sets
 capped at 256k because every turn resends the whole context, and clamped to
 Claude Code's 100k minimum. It falls back to 256k when the lookup fails, and it
 doesn't follow a mid-session `/model` switch.
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window, and
+Claude Code uses the smaller of it and the auto-compact window. With the
+auto-compact window already set, it changes nothing, and it doesn't remove the
+`[1m]` suffix on the picker's Default row either, so the launcher leaves it
+unset.
+
+Auto mode's permission classifier runs on the main model, as two extra requests
+per tool call it checks (`CLAUDE_CODE_AUTO_MODE_MODEL` can point it elsewhere).
+Those requests carry a large system prompt and aren't written to the
+transcript, so the status line's cost leaves them out.
 
 Claude Code's gateway model discovery (`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`)
 only keeps model ids containing "claude" or "anthropic", so the picker is

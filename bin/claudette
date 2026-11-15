@@ -186,6 +186,9 @@ export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1
 # Skips calls that go straight to api.anthropic.com and would fail or leak
 # usage data without an Anthropic account.
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+# The "how is Claude doing?" survey asks about Claude, not the Mistral model
+# that answered.
+export CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
 
 # The search MCP server reads the key from here when MISTRAL_API_KEY is unset.
 export CLAUDETTE_CONFIG
