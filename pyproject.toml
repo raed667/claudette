@@ -1,6 +1,6 @@
 [project]
 name = "claudette"
-version = "1.0.0"
+version = "1.0.1"
 description = "Run Claude Code against Mistral models through a local LiteLLM proxy"
 requires-python = ">=3.11,<3.14"
 license = "MIT"
